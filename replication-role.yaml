@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Draft (2 of 3): REPLICATION ROLE stack. Deploy this in us-west-2, AFTER the
+  destination stack and BEFORE the source stack. Creates the source-side KMS
+  key (or references an existing one you supply) and the replication IAM
+  role, whose policy needs the real ARNs of both KMS keys and both buckets.
+  Outputs the role's ARN and the source key's ARN, which you pass into the
+  source stack.
+
+# ---------------------------------------------------------------------------
+# DEPLOY ORDER: destination-stack-us-west-1-sec-review.yaml FIRST, then THIS stack
+# SECOND, then source-stack-us-west-2-sec-review.yaml LAST.
+#
+# WHY THE ROLE IS ITS OWN STACK: the replication role's policy names four
+# real resource ARNs (source bucket, destination bucket, source key,
+# destination key). If the role were created inside the same stack as the
+# source bucket, and you wanted to bring your own KMS key with a policy
+# scoped to this role (rather than to account root), you would hit a
+# chicken-and-egg problem: the role's ARN would not exist yet at the point
+# you need to grant it on your existing key, because both would be created
+# in the same deploy. Creating the role here, in its own stack, means it has
+# a real ARN before the source stack (and before you grant that ARN on any
+# existing KMS keys) ever runs.
+#
+# BRING YOUR OWN KMS KEY (source side): leave ExistingSourceKmsKeyArn empty
+# (the default) to have this stack create a dedicated source key for you. To
+# use a key you already own, pass its ARN here instead. If you do, and you
+# want that key's policy scoped to this replication role rather than to
+# account root, grant this stack's ReplicationRoleArn output on your existing
+# key's policy AFTER this stack finishes and BEFORE you deploy the source
+# stack. See the blog post's "Bringing your own KMS key" section for the
+# full walkthrough.
+# ---------------------------------------------------------------------------
+
+Parameters:
+
+  SourceBucketName:
+    Type: String
+    Description: >-
+      Name of the source bucket (created by the source stack, deployed after
+      this one). Must match SourceBucketName there exactly.
+
+  DestinationBucketName:
+    Type: String
+    Description: Destination bucket name (output of the destination stack).
+
+  DestinationKmsKeyArn:
+    Type: String
+    Description: Destination bucket's KMS key ARN (output of the destination stack).
+
+  DestinationRegion:
+    Type: String
+    Description: Region where the destination bucket lives (for kms:ViaService).
+    Default: us-west-1
+
+  # >>> BRING YOUR OWN KMS KEY (optional) <<<
+  # Leave empty to have this stack create a dedicated key for the SOURCE
+  # bucket. To use an existing customer-managed key instead, pass its full ARN
+  # here.
+  ExistingSourceKmsKeyArn:
+    Type: String
+    Description: >-
+      ARN of an existing customer-managed KMS key to use for the source bucket
+      instead of creating one. Leave blank to create a new key.
+    Default: ""
+
+  # >>> CUSTOM REPLICATION ROLE NAME (optional) <<<
+  # Leave blank to let CloudFormation generate a unique role name. Provide a
+  # name here to match your organization's naming or tagging conventions, or
+  # if you plan to pre-authorize this role's ARN on an existing KMS key before
+  # this stack finishes creating it.
+  ReplicationRoleName:
+    Type: String
+    Description: >-
+      Optional name for the replication IAM role. Leave blank to let
+      CloudFormation generate a unique name.
+    Default: ""
+
+Conditions:
+
+  CreateNewSourceKmsKey: !Equals [!Ref ExistingSourceKmsKeyArn, ""]
+  HasCustomRoleName: !Not [!Equals [!Ref ReplicationRoleName, ""]]
+
+Resources:
+
+  SourceKmsKey:
+    Type: AWS::KMS::Key
+    Condition: CreateNewSourceKmsKey
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "SSE-KMS key for source bucket ${SourceBucketName}"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+  SourceKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Condition: CreateNewSourceKmsKey
+    Properties:
+      AliasName: !Sub "alias/${SourceBucketName}-key"
+      TargetKeyId: !Ref SourceKmsKey
+
+  # Standalone managed policy (instead of an inline role policy) so the role
+  # carries no inline Policies block. The managed policy is attached to the
+  # role below via ManagedPolicyArns. It defines no Roles/Users/Groups of its
+  # own, so the dependency runs one way: the role depends on this policy.
+  ReplicationManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: S3 cross-region replication permissions for the replication role.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Read replication config + list the source bucket.
+          - Effect: Allow
+            Action:
+              - s3:GetReplicationConfiguration
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${SourceBucketName}"
+          # Read source object versions, ACLs, tags, and Object Lock state.
+          - Effect: Allow
+            Action:
+              - s3:GetObjectVersionForReplication
+              - s3:GetObjectVersionAcl
+              - s3:GetObjectVersionTagging
+              - s3:GetObjectRetention
+              - s3:GetObjectLegalHold
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${SourceBucketName}/*"
+          # Write replicas into the destination bucket.
+          - Effect: Allow
+            Action:
+              - s3:ReplicateObject
+              - s3:ReplicateDelete
+              - s3:ReplicateTags
+              - s3:ObjectOwnerOverrideToBucketOwner
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketName}/*"
+          # Decrypt source objects with the SOURCE key (in this region).
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+            Resource:
+              - !If
+                - CreateNewSourceKmsKey
+                - !GetAtt SourceKmsKey.Arn
+                - !Ref ExistingSourceKmsKeyArn
+            Condition:
+              StringLike:
+                kms:ViaService: !Sub "s3.${AWS::Region}.amazonaws.com"
+          # Encrypt replicas with the DESTINATION key (in DestinationRegion).
+          - Effect: Allow
+            Action:
+              - kms:Encrypt
+              - kms:GenerateDataKey
+            Resource:
+              - !Ref DestinationKmsKeyArn
+            Condition:
+              StringLike:
+                kms:ViaService: !Sub "s3.${DestinationRegion}.amazonaws.com"
+
+  ReplicationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !If
+        - HasCustomRoleName
+        - !Ref ReplicationRoleName
+        - !Ref "AWS::NoValue"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref ReplicationManagedPolicy
+
+Outputs:
+
+  ReplicationRoleArn:
+    Description: >-
+      Pass this into the SOURCE stack as ReplicationRoleArn. If you brought
+      your own source KMS key and want it scoped to this role rather than to
+      account root, grant this ARN on that key's policy before deploying the
+      source stack.
+    Value: !GetAtt ReplicationRole.Arn
+
+  ReplicationRoleName:
+    Description: Name of the replication role (useful if CloudFormation generated it).
+    Value: !Ref ReplicationRole
+
+  SourceKmsKeyArn:
+    Description: Pass this into the SOURCE stack as SourceKmsKeyArn.
+    Value: !If
+      - CreateNewSourceKmsKey
+      - !GetAtt SourceKmsKey.Arn
+      - !Ref ExistingSourceKmsKeyArn

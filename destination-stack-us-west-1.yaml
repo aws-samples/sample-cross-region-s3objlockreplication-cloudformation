@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Draft (1 of 2): DESTINATION stack for cross-region replication.
+  Deploy this in us-west-1. Creates the replica bucket with Object Lock (WORM),
+  versioning, and SSE-KMS using a dedicated customer-managed key, or an
+  existing customer-managed key you already own. Outputs the bucket name and
+  KMS key ARN, which you pass into the SOURCE stack (us-west-2).
+
+# ---------------------------------------------------------------------------
+# DEPLOY ORDER: this stack FIRST (us-west-1), then source-stack-us-west-2.yaml.
+# Object Lock must be enabled here so replicated retention/legal-hold state can
+# land on the replica. Object Lock requires versioning (enabled below).
+# The KMS key policy grants the account root full control, so the source
+# stack's replication role can use this key via its own IAM policy (same
+# account). No cross-stack role reference is needed here.
+#
+# BRING YOUR OWN KMS KEY: leave ExistingKmsKeyArn empty (the default) to have
+# this stack create a dedicated key for you. To use a key you already own,
+# pass its ARN as ExistingKmsKeyArn. That key's policy must already grant the
+# account root (or the specific principals that need it) kms:Encrypt,
+# kms:Decrypt, and kms:GenerateDataKey, since this stack does not modify the
+# policy of a key it did not create.
+# ---------------------------------------------------------------------------
+
+Parameters:
+
+  DestinationBucketName:
+    Type: String
+    Description: Name of the destination (replica) bucket. Must be globally unique.
+
+  # Server access logging target. Provide the name of an EXISTING bucket that
+  # will receive S3 server access logs for the destination bucket. This must be
+  # a separate bucket that does NOT have Object Lock enabled, S3 does not allow
+  # an Object Lock bucket to be used as a server access logging destination.
+  LoggingBucketName:
+    Type: String
+    Description: >-
+      Name of an existing S3 bucket (without Object Lock) that will receive
+      server access logs for the destination bucket.
+
+  # >>> MODIFY HERE #1: RETENTION MODE <<<
+  #   GOVERNANCE : privileged users can still shorten/remove the lock.
+  #   COMPLIANCE : no one (not even root) can, until retention expires.
+  RetentionMode:
+    Type: String
+    Description: Object Lock default retention mode applied to new objects.
+    AllowedValues:
+      - GOVERNANCE   # <-- option A
+      - COMPLIANCE   # <-- option B
+    Default: GOVERNANCE   # <<< CHANGE ME
+
+  # >>> MODIFY HERE #2: RETENTION PERIOD (DAYS) <<<
+  # Valid range: 1 to 36500 (~100 years). Use Days OR Years, never both.
+  RetentionDays:
+    Type: Number
+    Description: Default retention period in days for new objects.
+    Default: 30           # <<< CHANGE ME
+    MinValue: 1
+    MaxValue: 36500
+
+  # >>> BRING YOUR OWN KMS KEY (optional) <<<
+  # Leave empty to have this stack create a dedicated key. To use an existing
+  # customer-managed key instead, pass its full ARN here.
+  ExistingKmsKeyArn:
+    Type: String
+    Description: >-
+      ARN of an existing customer-managed KMS key to use instead of creating
+      one. Leave blank to create a new key.
+    Default: ""
+
+Conditions:
+
+  CreateNewKmsKey: !Equals [!Ref ExistingKmsKeyArn, ""]
+
+Resources:
+
+  DestinationKmsKey:
+    Type: AWS::KMS::Key
+    Condition: CreateNewKmsKey
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "SSE-KMS key for destination bucket ${DestinationBucketName}"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+  DestinationKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Condition: CreateNewKmsKey
+    Properties:
+      AliasName: !Sub "alias/${DestinationBucketName}-key"
+      TargetKeyId: !Ref DestinationKmsKey
+
+  DestinationBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref DestinationBucketName
+      ObjectLockEnabled: true
+      # ACLs are disabled by modern S3 defaults; set Private explicitly so the
+      # bucket can never carry a public-read/read-write canned ACL. This pairs
+      # with the PublicAccessBlockConfiguration below.
+      AccessControl: Private
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !If
+                - CreateNewKmsKey
+                - !GetAtt DestinationKmsKey.Arn
+                - !Ref ExistingKmsKeyArn
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucketName
+        LogFilePrefix: !Sub "${DestinationBucketName}/"
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: !Ref RetentionMode
+            # >>> MODIFY HERE #3: DAYS vs YEARS <<<
+            # Use EITHER Days OR Years. For years: replace with Years: <1-100>.
+            Days: !Ref RetentionDays
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+Outputs:
+
+  DestinationBucketName:
+    Description: Pass this into the SOURCE stack as DestinationBucketName.
+    Value: !Ref DestinationBucket
+
+  DestinationBucketArn:
+    Description: ARN of the destination bucket.
+    Value: !GetAtt DestinationBucket.Arn
+
+  DestinationKmsKeyArn:
+    Description: Pass this into the SOURCE stack as DestinationKmsKeyArn.
+    Value: !If
+      - CreateNewKmsKey
+      - !GetAtt DestinationKmsKey.Arn
+      - !Ref ExistingKmsKeyArn

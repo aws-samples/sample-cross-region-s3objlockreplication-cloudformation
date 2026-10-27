@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Draft (3 of 3): SOURCE stack for cross-region replication.
+  Deploy this in us-west-2, LAST, after destination-stack-us-west-1-sec-review.yaml
+  and replication-role-sec-review.yaml. Creates only the source bucket, with Object
+  Lock (WORM), versioning, SSE-KMS, and the replication rule that targets the
+  us-west-1 destination bucket. The KMS key and the replication role are
+  created by the earlier stacks and passed in here by ARN.
+
+# ---------------------------------------------------------------------------
+# DEPLOY ORDER (3 stacks, in this order):
+#   1. destination-stack-us-west-1-sec-review.yaml  (us-west-1)
+#   2. replication-role-sec-review.yaml             (us-west-2)
+#   3. source-stack-us-west-2-sec-review.yaml       (us-west-2)   <- this template
+#
+# Feed outputs forward at each step:
+#   From destination stack -> replication-role-sec-review.yaml:
+#     DestinationBucketName, DestinationKmsKeyArn
+#   From replication-role-sec-review.yaml -> this stack:
+#     SourceKmsKeyArn, ReplicationRoleArn
+#   From destination stack -> this stack (also needed here):
+#     DestinationBucketName, DestinationKmsKeyArn
+#
+# WHY THE KMS KEY AND ROLE ARE NOT CREATED HERE: this stack only creates the
+# source bucket. The KMS key and the replication role both moved to
+# replication-role-sec-review.yaml, which deploys before this stack, so that a real
+# role ARN and a real key ARN both exist before this stack (or you, if
+# bringing your own key) ever needs to reference them. See
+# replication-role-sec-review.yaml for the full explanation.
+#
+# CROSS-REGION KMS NOTE: replication decrypts source objects in us-west-2 and
+# re-encrypts replicas in us-west-1. This is handled by the replication
+# role's policy (created in replication-role-sec-review.yaml), not by this stack.
+# ---------------------------------------------------------------------------
+
+Parameters:
+
+  SourceBucketName:
+    Type: String
+    Description: >-
+      Name of the source (primary) bucket. Must be globally unique, and must
+      match the SourceBucketName you passed to replication-role-sec-review.yaml.
+
+  # Server access logging target. Provide the name of an EXISTING bucket that
+  # will receive S3 server access logs for the source bucket. This must be a
+  # separate bucket that does NOT have Object Lock enabled, S3 does not allow
+  # an Object Lock bucket to be used as a server access logging destination.
+  LoggingBucketName:
+    Type: String
+    Description: >-
+      Name of an existing S3 bucket (without Object Lock) that will receive
+      server access logs for the source bucket.
+
+  DestinationBucketName:
+    Type: String
+    Description: Destination bucket name (output of the destination stack).
+
+  DestinationKmsKeyArn:
+    Type: String
+    Description: Destination bucket's KMS key ARN (output of the destination stack).
+
+  SourceKmsKeyArn:
+    Type: String
+    Description: Source bucket's KMS key ARN (output of replication-role-sec-review.yaml).
+
+  ReplicationRoleArn:
+    Type: String
+    Description: Replication role ARN (output of replication-role-sec-review.yaml).
+
+  # >>> MODIFY HERE #1: RETENTION MODE <<<
+  #   GOVERNANCE : privileged users can still shorten/remove the lock.
+  #   COMPLIANCE : no one (not even root) can, until retention expires.
+  RetentionMode:
+    Type: String
+    Description: Object Lock default retention mode applied to new objects.
+    AllowedValues:
+      - GOVERNANCE   # <-- option A
+      - COMPLIANCE   # <-- option B
+    Default: GOVERNANCE   # <<< CHANGE ME
+
+  # >>> MODIFY HERE #2: RETENTION PERIOD (DAYS) <<<
+  # Valid range: 1 to 36500 (~100 years). Use Days OR Years, never both.
+  RetentionDays:
+    Type: Number
+    Description: Default retention period in days for new objects.
+    Default: 30           # <<< CHANGE ME
+    MinValue: 1
+    MaxValue: 36500
+
+Resources:
+
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref SourceBucketName
+      ObjectLockEnabled: true
+      # ACLs are disabled by modern S3 defaults; set Private explicitly so the
+      # bucket can never carry a public-read/read-write canned ACL. This pairs
+      # with the PublicAccessBlockConfiguration below.
+      AccessControl: Private
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref SourceKmsKeyArn
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucketName
+        LogFilePrefix: !Sub "${SourceBucketName}/"
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: !Ref RetentionMode
+            # >>> MODIFY HERE #3: DAYS vs YEARS <<<
+            # Use EITHER Days OR Years. For years: replace with Years: <1-100>.
+            Days: !Ref RetentionDays
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      ReplicationConfiguration:
+        Role: !Ref ReplicationRoleArn
+        Rules:
+          - Id: ReplicateEverythingWithLockState
+            Status: Enabled
+            Priority: 0
+            Filter:
+              Prefix: ""
+            DeleteMarkerReplication:
+              Status: Enabled
+            # Replicate objects encrypted with SSE-KMS (skipped by default).
+            SourceSelectionCriteria:
+              SseKmsEncryptedObjects:
+                Status: Enabled
+            Destination:
+              Bucket: !Sub "arn:${AWS::Partition}:s3:::${DestinationBucketName}"
+              # Re-encrypt replicas with the destination bucket's KMS key.
+              EncryptionConfiguration:
+                ReplicaKmsKeyID: !Ref DestinationKmsKeyArn
+            # Object Lock retention & legal-hold state replicates automatically
+            # because the destination bucket has Object Lock enabled and the
+            # replication role (created in replication-role-sec-review.yaml) holds
+            # s3:GetObjectRetention / s3:GetObjectLegalHold.
+
+Outputs:
+
+  SourceBucketArn:
+    Description: ARN of the source bucket.
+    Value: !GetAtt SourceBucket.Arn
