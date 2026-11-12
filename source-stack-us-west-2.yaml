@@ -2,36 +2,36 @@ AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >-
   Draft (3 of 3): SOURCE stack for cross-region replication.
-  Deploy this in us-west-2, LAST, after destination-stack-us-west-1-sec-review.yaml
-  and replication-role-sec-review.yaml. Creates only the source bucket, with Object
+  Deploy this in us-west-2, LAST, after destination-stack-us-west-1.yaml
+  and replication-role.yaml. Creates only the source bucket, with Object
   Lock (WORM), versioning, SSE-KMS, and the replication rule that targets the
   us-west-1 destination bucket. The KMS key and the replication role are
   created by the earlier stacks and passed in here by ARN.
 
 # ---------------------------------------------------------------------------
 # DEPLOY ORDER (3 stacks, in this order):
-#   1. destination-stack-us-west-1-sec-review.yaml  (us-west-1)
-#   2. replication-role-sec-review.yaml             (us-west-2)
-#   3. source-stack-us-west-2-sec-review.yaml       (us-west-2)   <- this template
+#   1. destination-stack-us-west-1.yaml  (us-west-1)
+#   2. replication-role.yaml             (us-west-2)
+#   3. source-stack-us-west-2.yaml       (us-west-2)   <- this template
 #
 # Feed outputs forward at each step:
-#   From destination stack -> replication-role-sec-review.yaml:
+#   From destination stack -> replication-role.yaml:
 #     DestinationBucketName, DestinationKmsKeyArn
-#   From replication-role-sec-review.yaml -> this stack:
+#   From replication-role.yaml -> this stack:
 #     SourceKmsKeyArn, ReplicationRoleArn
 #   From destination stack -> this stack (also needed here):
 #     DestinationBucketName, DestinationKmsKeyArn
 #
 # WHY THE KMS KEY AND ROLE ARE NOT CREATED HERE: this stack only creates the
 # source bucket. The KMS key and the replication role both moved to
-# replication-role-sec-review.yaml, which deploys before this stack, so that a real
+# replication-role.yaml, which deploys before this stack, so that a real
 # role ARN and a real key ARN both exist before this stack (or you, if
 # bringing your own key) ever needs to reference them. See
-# replication-role-sec-review.yaml for the full explanation.
+# replication-role.yaml for the full explanation.
 #
 # CROSS-REGION KMS NOTE: replication decrypts source objects in us-west-2 and
 # re-encrypts replicas in us-west-1. This is handled by the replication
-# role's policy (created in replication-role-sec-review.yaml), not by this stack.
+# role's policy (created in replication-role.yaml), not by this stack.
 # ---------------------------------------------------------------------------
 
 Parameters:
@@ -40,7 +40,7 @@ Parameters:
     Type: String
     Description: >-
       Name of the source (primary) bucket. Must be globally unique, and must
-      match the SourceBucketName you passed to replication-role-sec-review.yaml.
+      match the SourceBucketName you passed to replication-role.yaml.
 
   # Server access logging target. Provide the name of an EXISTING bucket that
   # will receive S3 server access logs for the source bucket. This must be a
@@ -62,11 +62,11 @@ Parameters:
 
   SourceKmsKeyArn:
     Type: String
-    Description: Source bucket's KMS key ARN (output of replication-role-sec-review.yaml).
+    Description: Source bucket's KMS key ARN (output of replication-role.yaml).
 
   ReplicationRoleArn:
     Type: String
-    Description: Replication role ARN (output of replication-role-sec-review.yaml).
+    Description: Replication role ARN (output of replication-role.yaml).
 
   # >>> MODIFY HERE #1: RETENTION MODE <<<
   #   GOVERNANCE : privileged users can still shorten/remove the lock.
@@ -146,7 +146,7 @@ Resources:
                 ReplicaKmsKeyID: !Ref DestinationKmsKeyArn
             # Object Lock retention & legal-hold state replicates automatically
             # because the destination bucket has Object Lock enabled and the
-            # replication role (created in replication-role-sec-review.yaml) holds
+            # replication role (created in replication-role.yaml) holds
             # s3:GetObjectRetention / s3:GetObjectLegalHold.
 
 Outputs:

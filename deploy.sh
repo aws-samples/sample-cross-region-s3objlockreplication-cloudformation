@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# deploy-sec-review.sh - Deploy the cross-region S3 Object Lock + Replication stacks.
+# deploy.sh - Deploy the cross-region S3 Object Lock + Replication stacks.
 #
 # Deploys THREE stacks in order:
-#   1. destination-stack-us-west-1-sec-review.yaml  (us-west-1)
-#   2. replication-role-sec-review.yaml             (us-west-2)
-#   3. source-stack-us-west-2-sec-review.yaml       (us-west-2)
+#   1. destination-stack-us-west-1.yaml  (us-west-1)
+#   2. replication-role.yaml             (us-west-2)
+#   3. source-stack-us-west-2.yaml       (us-west-2)
 #
 # The role is its own stack (step 2) so it has a real ARN before the source
 # stack runs, and before you grant that ARN on any existing KMS key you
-# bring in. See replication-role-sec-review.yaml for why.
+# bring in. See replication-role.yaml for why.
 #
 # By default, stacks 1 and 2 each create their own dedicated KMS key. If you
 # already have customer-managed KMS keys you want to use instead, pass their
@@ -25,7 +25,7 @@
 # it already grants account root).
 #
 # Usage:
-#   ./deploy-sec-review.sh <source-bucket-name> <destination-bucket-name> \
+#   ./deploy.sh <source-bucket-name> <destination-bucket-name> \
 #               <source-logging-bucket-name> <destination-logging-bucket-name> \
 #               [retention-mode] [retention-days] \
 #               [existing-destination-kms-key-arn] [existing-source-kms-key-arn] \
@@ -39,19 +39,19 @@
 #
 # Examples:
 #   # Let both stacks create their own KMS keys (default behavior).
-#   ./deploy-sec-review.sh amzn-s3-demo-source-uswest2 amzn-s3-demo-dest-uswest1 \
+#   ./deploy.sh amzn-s3-demo-source-uswest2 amzn-s3-demo-dest-uswest1 \
 #       amzn-s3-demo-logs-uswest2 amzn-s3-demo-logs-uswest1 GOVERNANCE 30
 #
 #   # Bring your own KMS keys for both buckets. The script will pause before
 #   # the source stack so you can grant the role's real ARN on your existing
 #   # source key first.
-#   ./deploy-sec-review.sh amzn-s3-demo-source-uswest2 amzn-s3-demo-dest-uswest1 \
+#   ./deploy.sh amzn-s3-demo-source-uswest2 amzn-s3-demo-dest-uswest1 \
 #       amzn-s3-demo-logs-uswest2 amzn-s3-demo-logs-uswest1 GOVERNANCE 30 \
 #       arn:aws:kms:us-west-1:111122223333:key/dest-key-id \
 #       arn:aws:kms:us-west-2:111122223333:key/source-key-id
 #
 #   # Same, with a specific replication role name.
-#   ./deploy-sec-review.sh amzn-s3-demo-source-uswest2 amzn-s3-demo-dest-uswest1 \
+#   ./deploy.sh amzn-s3-demo-source-uswest2 amzn-s3-demo-dest-uswest1 \
 #       amzn-s3-demo-logs-uswest2 amzn-s3-demo-logs-uswest1 GOVERNANCE 30 \
 #       arn:aws:kms:us-west-1:111122223333:key/dest-key-id \
 #       arn:aws:kms:us-west-2:111122223333:key/source-key-id \
@@ -69,8 +69,8 @@ set -euo pipefail
 # --------------------------------------------------------------------------
 # Inputs
 # --------------------------------------------------------------------------
-SOURCE_BUCKET="${1:?Usage: ./deploy-sec-review.sh <source-bucket> <destination-bucket> <source-logging-bucket> <destination-logging-bucket> [mode] [days] [existing-dest-kms-arn] [existing-source-kms-arn] [replication-role-name]}"
-DEST_BUCKET="${2:?Usage: ./deploy-sec-review.sh <source-bucket> <destination-bucket> <source-logging-bucket> <destination-logging-bucket> [mode] [days] [existing-dest-kms-arn] [existing-source-kms-arn] [replication-role-name]}"
+SOURCE_BUCKET="${1:?Usage: ./deploy.sh <source-bucket> <destination-bucket> <source-logging-bucket> <destination-logging-bucket> [mode] [days] [existing-dest-kms-arn] [existing-source-kms-arn] [replication-role-name]}"
+DEST_BUCKET="${2:?Usage: ./deploy.sh <source-bucket> <destination-bucket> <source-logging-bucket> <destination-logging-bucket> [mode] [days] [existing-dest-kms-arn] [existing-source-kms-arn] [replication-role-name]}"
 SOURCE_LOGGING_BUCKET="${3:?A source-region (us-west-2) server access logging bucket is required. It must be an existing bucket WITHOUT Object Lock.}"
 DEST_LOGGING_BUCKET="${4:?A destination-region (us-west-1) server access logging bucket is required. It must be an existing bucket WITHOUT Object Lock.}"
 RETENTION_MODE="${5:-GOVERNANCE}"
@@ -87,9 +87,9 @@ SOURCE_REGION="us-west-2"
 DEST_STACK="s3-objlock-destination"
 ROLE_STACK="s3-objlock-replication-role"
 SOURCE_STACK="s3-objlock-source"
-DEST_TEMPLATE="destination-stack-us-west-1-sec-review.yaml"
-ROLE_TEMPLATE="replication-role-sec-review.yaml"
-SOURCE_TEMPLATE="source-stack-us-west-2-sec-review.yaml"
+DEST_TEMPLATE="destination-stack-us-west-1.yaml"
+ROLE_TEMPLATE="replication-role.yaml"
+SOURCE_TEMPLATE="source-stack-us-west-2.yaml"
 
 echo "==> [1/3] Deploying DESTINATION stack '${DEST_STACK}' in ${DEST_REGION}..."
 if [[ -n "${EXISTING_DEST_KMS_KEY_ARN}" ]]; then

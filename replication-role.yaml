@@ -9,8 +9,8 @@ Description: >-
   source stack.
 
 # ---------------------------------------------------------------------------
-# DEPLOY ORDER: destination-stack-us-west-1-sec-review.yaml FIRST, then THIS stack
-# SECOND, then source-stack-us-west-2-sec-review.yaml LAST.
+# DEPLOY ORDER: destination-stack-us-west-1.yaml FIRST, then THIS stack
+# SECOND, then source-stack-us-west-2.yaml LAST.
 #
 # WHY THE ROLE IS ITS OWN STACK: the replication role's policy names four
 # real resource ARNs (source bucket, destination bucket, source key,
